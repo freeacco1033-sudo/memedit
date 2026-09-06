@@ -1,9 +1,24 @@
-name: Test
+name: Build memedit
 
 on: [push, workflow_dispatch]
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "GitHub Actions works"
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf
+
+      - name: Compile memedit
+        run: arm-linux-gnueabihf-gcc -static -o memedit memedit.c
+
+      - name: Upload memedit
+        uses: actions/upload-artifact@v4
+        with:
+          name: memedit
+          path: memedit
