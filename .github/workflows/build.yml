@@ -1,25 +1,9 @@
-name: Build memedit
+name: Test
 
-on:
-  workflow_dispatch:
+on: [push, workflow_dispatch]
 
 jobs:
-  build:
-    runs-on: ubuntu-20.04
+  test:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v2
-
-      - name: Install compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-arm-linux-gnueabihf
-
-      - name: Compile memedit
-        run: arm-linux-gnueabihf-gcc -static -o memedit memedit.c
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v3
-        with:
-          name: memedit
-          path: memedit
+      - run: echo "GitHub Actions works"
