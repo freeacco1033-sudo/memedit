@@ -1,22 +1,25 @@
 name: Build memedit
 
-on: workflow_dispatch
+on:
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v2
 
       - name: Install compiler
-        run: sudo apt-get update && sudo apt-get install -y gcc-arm-linux-gnueabihf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf
 
-      - name: Compile
+      - name: Compile memedit
         run: arm-linux-gnueabihf-gcc -static -o memedit memedit.c
 
-      - name: Upload
-        uses: actions/upload-artifact@v4
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
         with:
           name: memedit
           path: memedit
