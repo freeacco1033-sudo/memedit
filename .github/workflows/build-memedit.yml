@@ -18,6 +18,7 @@ jobs:
       - name: Compile memedit
         run: |
           arm-linux-gnueabihf-gcc -static -o memedit memedit.c
+          ls -l memedit
 
       - name: Upload memedit
         uses: actions/upload-artifact@v4
