@@ -1,23 +1,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/uio.h>
+#include <unistd.h>
 #include <fcntl.h>
-#include <errno.h>
 #include <math.h>
+#include <errno.h>
 
-// دالة لقراءة كتلة من الذاكرة باستخدام process_vm_readv مع fallback إلى ptrace
+// قراءة كتلة من الذاكرة
 ssize_t read_mem(pid_t pid, unsigned long addr, void *buf, size_t len) {
     struct iovec local = { buf, len };
     struct iovec remote = { (void*)addr, len };
     ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
     if (n > 0) return n;
-    // fallback إلى ptrace بالكلمات
     if (errno == ENOSYS || errno == EPERM) {
+        // fallback إلى ptrace
         for (size_t i = 0; i < len; i += sizeof(long)) {
             long word = ptrace(PTRACE_PEEKDATA, pid, (void*)(addr + i), NULL);
             if (word == -1) return -1;
@@ -29,7 +29,7 @@ ssize_t read_mem(pid_t pid, unsigned long addr, void *buf, size_t len) {
     return -1;
 }
 
-// دالة لكتابة كتلة من الذاكرة باستخدام process_vm_writev مع fallback إلى ptrace
+// كتابة كتلة إلى الذاكرة
 ssize_t write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     struct iovec local = { (void*)buf, len };
     struct iovec remote = { (void*)addr, len };
@@ -47,7 +47,7 @@ ssize_t write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     return -1;
 }
 
-// أمر البحث والاستبدال
+// البحث عن قيمة float واستبدالها في كل الذاكرة القابلة للقراءة والكتابة
 void scan_and_replace(pid_t pid, float target, float new_value) {
     char maps_path[128];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
@@ -63,10 +63,9 @@ void scan_and_replace(pid_t pid, float target, float new_value) {
     int count = 0;
 
     while (fscanf(fp, "%lx-%lx %4s %*s %*s %*s %255[^\n]", &start, &end, perms, path) == 3) {
-        // نبحث في المناطق القابلة للقراءة والكتابة فقط (rw-p)
         if (perms[0] != 'r' || perms[1] != 'w') continue;
         size_t len = end - start;
-        if (len == 0 || len > 200 * 1024 * 1024) continue; // تجاهل المناطق الضخمة
+        if (len == 0 || len > 200 * 1024 * 1024) continue;
 
         char *buf = malloc(len);
         if (!buf) continue;
@@ -80,7 +79,7 @@ void scan_and_replace(pid_t pid, float target, float new_value) {
         for (size_t i = 0; i + sizeof(float) <= (size_t)nread; i += 4) {
             float val;
             memcpy(&val, buf + i, sizeof(val));
-            if (fabsf(val - target) < 0.01f) { // تطابق تقريبي
+            if (fabsf(val - target) < 0.01f) {
                 float new_val = new_value;
                 if (write_mem(pid, start + i, &new_val, sizeof(new_val)) > 0) {
                     count++;
@@ -113,7 +112,6 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
-    // الأوامر الأخرى كما كانت
     unsigned long addr = strtoul(argv[3], NULL, 16);
 
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
