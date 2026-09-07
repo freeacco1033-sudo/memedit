@@ -48,6 +48,20 @@ ssize_t write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     return -1;
 }
 
+// إرفاق العملية
+void attach_process(pid_t pid) {
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        perror("ptrace ATTACH");
+        exit(1);
+    }
+    waitpid(pid, NULL, 0);
+}
+
+// فصل العملية
+void detach_process(pid_t pid) {
+    ptrace(PTRACE_DETACH, pid, NULL, NULL);
+}
+
 // البحث عن قيمة float واستبدالها
 void scan_and_replace(pid_t pid, float target, float new_value) {
     char maps_path[128];
@@ -107,6 +121,8 @@ void dump_libs(pid_t pid, const char *outdir) {
     snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", outdir);
     system(mkdir_cmd);
 
+    attach_process(pid);
+
     char line[512];
     int count = 0;
     while (fgets(line, sizeof(line), fp)) {
@@ -140,7 +156,9 @@ void dump_libs(pid_t pid, const char *outdir) {
         free(buf);
         fclose(out);
     }
+
     fclose(fp);
+    detach_process(pid);
     printf("Total dumped: %d files\n", count);
 }
 
@@ -174,22 +192,24 @@ void dump_single_lib(pid_t pid, const char *libname, const char *outpath) {
         return;
     }
 
+    attach_process(pid);
+
     Elf64_Ehdr ehdr;
     if (read_mem(pid, base_addr, &ehdr, sizeof(ehdr)) <= 0) {
         printf("Failed to read ELF header\n");
+        detach_process(pid);
         return;
     }
 
     FILE *out = fopen(outpath, "wb");
     if (!out) {
         perror("fopen output");
+        detach_process(pid);
         return;
     }
 
-    // كتابة ELF header كما هو
     fwrite(&ehdr, sizeof(ehdr), 1, out);
 
-    // نسخ المقاطع المحملة
     for (int i = 0; i < ehdr.e_phnum; i++) {
         Elf64_Phdr phdr;
         unsigned long phdr_addr = base_addr + ehdr.e_phoff + i * ehdr.e_phentsize;
@@ -205,6 +225,7 @@ void dump_single_lib(pid_t pid, const char *libname, const char *outpath) {
     }
 
     fclose(out);
+    detach_process(pid);
     printf("Dumped %s to %s\n", libname, outpath);
 }
 
