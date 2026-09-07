@@ -1,23 +1,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/uio.h>
-#include <unistd.h>
 #include <fcntl.h>
 #include <math.h>
 #include <errno.h>
+#include <libgen.h>  // basename
 
-// قراءة كتلة من الذاكرة
+// ---- دوال القراءة والكتابة من الذاكرة ----
 ssize_t read_mem(pid_t pid, unsigned long addr, void *buf, size_t len) {
     struct iovec local = { buf, len };
     struct iovec remote = { (void*)addr, len };
     ssize_t n = process_vm_readv(pid, &local, 1, &remote, 1, 0);
     if (n > 0) return n;
     if (errno == ENOSYS || errno == EPERM) {
-        // fallback إلى ptrace
         for (size_t i = 0; i < len; i += sizeof(long)) {
             long word = ptrace(PTRACE_PEEKDATA, pid, (void*)(addr + i), NULL);
             if (word == -1) return -1;
@@ -29,7 +29,6 @@ ssize_t read_mem(pid_t pid, unsigned long addr, void *buf, size_t len) {
     return -1;
 }
 
-// كتابة كتلة إلى الذاكرة
 ssize_t write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     struct iovec local = { (void*)buf, len };
     struct iovec remote = { (void*)addr, len };
@@ -47,7 +46,7 @@ ssize_t write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     return -1;
 }
 
-// البحث عن قيمة float واستبدالها في كل الذاكرة القابلة للقراءة والكتابة
+// ---- البحث والاستبدال (الأمر scan) ----
 void scan_and_replace(pid_t pid, float target, float new_value) {
     char maps_path[128];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
@@ -92,6 +91,66 @@ void scan_and_replace(pid_t pid, float target, float new_value) {
     printf("Patched %d occurrences\n", count);
 }
 
+// ---- استخراج مكتبات .so من الذاكرة (الأمر dumplibs) ----
+void dump_libs(pid_t pid, const char *outdir) {
+    char maps_path[128];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *fp = fopen(maps_path, "r");
+    if (!fp) {
+        perror("fopen maps");
+        return;
+    }
+
+    // إنشاء مجلد الإخراج إذا لم يوجد
+    char mkdir_cmd[512];
+    snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", outdir);
+    system(mkdir_cmd);
+
+    char line[512];
+    int count = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long start, end;
+        char perms[5];
+        char path[256] = {0};
+        if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %255[^\n]", &start, &end, perms, path) < 3) continue;
+
+        // نستخرج فقط المناطق التي تحتوي على .so
+        if (strstr(path, ".so") == NULL) continue;
+        if (perms[0] != 'r') continue; // يجب أن تكون قابلة للقراءة
+
+        // إنشاء اسم ملف الإخراج
+        char filename[512];
+        char *base = basename(path);
+        snprintf(filename, sizeof(filename), "%s/%s_%lx_%lx.so", outdir, base, start, end);
+        FILE *out = fopen(filename, "wb");
+        if (!out) {
+            perror("fopen output");
+            continue;
+        }
+
+        size_t len = end - start;
+        char *buf = malloc(len);
+        if (!buf) {
+            fclose(out);
+            continue;
+        }
+
+        ssize_t n = read_mem(pid, start, buf, len);
+        if (n > 0) {
+            fwrite(buf, 1, n, out);
+            count++;
+            printf("Dumped: %s (%zu bytes)\n", filename, n);
+        } else {
+            printf("Failed to read %lx-%lx %s\n", start, end, path);
+        }
+
+        free(buf);
+        fclose(out);
+    }
+    fclose(fp);
+    printf("Total dumped: %d files\n", count);
+}
+
 int main(int argc, char *argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage:\n");
@@ -100,6 +159,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  %s writei <pid> <address> <value_int>\n", argv[0]);
         fprintf(stderr, "  %s writeb <pid> <address> <value_byte>\n", argv[0]);
         fprintf(stderr, "  %s scan <pid> <target_float> <new_float>\n", argv[0]);
+        fprintf(stderr, "  %s dumplibs <pid> <output_dir>\n", argv[0]);
         return 1;
     }
 
@@ -109,6 +169,11 @@ int main(int argc, char *argv[]) {
         float target = atof(argv[3]);
         float new_val = atof(argv[4]);
         scan_and_replace(pid, target, new_val);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "dumplibs") == 0 && argc == 4) {
+        dump_libs(pid, argv[3]);
         return 0;
     }
 
