@@ -10,7 +10,9 @@ int main(int argc, char *argv[]) {
     if (argc < 4) {
         fprintf(stderr, "Usage:\n");
         fprintf(stderr, "  %s read <pid> <address>\n", argv[0]);
-        fprintf(stderr, "  %s write <pid> <address> <value>\n", argv[0]);
+        fprintf(stderr, "  %s write <pid> <address> <value_float>\n", argv[0]);
+        fprintf(stderr, "  %s writei <pid> <address> <value_int>\n", argv[0]);
+        fprintf(stderr, "  %s writeb <pid> <address> <value_byte>\n", argv[0]);
         return 1;
     }
 
@@ -36,7 +38,7 @@ int main(int argc, char *argv[]) {
         }
         float result;
         memcpy(&result, &data, sizeof(result));
-        printf("0x%lx = %f\n", addr, result);
+        printf("0x%lx = %f (0x%x)\n", addr, result, data);
     } else if (strcmp(argv[1], "write") == 0 && argc == 5) {
         float value = atof(argv[4]);
         unsigned int data;
@@ -50,6 +52,30 @@ int main(int argc, char *argv[]) {
             }
         }
         printf("OK\n");
+    } else if (strcmp(argv[1], "writei") == 0 && argc == 5) {
+        int value = atoi(argv[4]);
+        unsigned int data = (unsigned int)value;
+        for (int i = 0; i < 4; i++) {
+            unsigned int byte = (data >> (i * 8)) & 0xFF;
+            if (ptrace(PTRACE_POKEDATA, pid, (void*)(addr + i), (void*)byte) == -1) {
+                perror("ptrace POKEDATA");
+                ptrace(PTRACE_DETACH, pid, NULL, NULL);
+                return 1;
+            }
+        }
+        printf("OK\n");
+    } else if (strcmp(argv[1], "writeb") == 0 && argc == 5) {
+        unsigned int value = (unsigned int)atoi(argv[4]) & 0xFF;
+        if (ptrace(PTRACE_POKEDATA, pid, (void*)addr, (void*)value) == -1) {
+            perror("ptrace POKEDATA");
+            ptrace(PTRACE_DETACH, pid, NULL, NULL);
+            return 1;
+        }
+        printf("OK\n");
+    } else {
+        fprintf(stderr, "Invalid arguments\n");
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        return 1;
     }
 
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
