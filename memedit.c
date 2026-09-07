@@ -9,9 +9,10 @@
 #include <fcntl.h>
 #include <math.h>
 #include <errno.h>
-#include <libgen.h>  // basename
+#include <libgen.h>
+#include <elf.h>
 
-// ---- دوال القراءة والكتابة من الذاكرة ----
+// قراءة كتلة من الذاكرة
 ssize_t read_mem(pid_t pid, unsigned long addr, void *buf, size_t len) {
     struct iovec local = { buf, len };
     struct iovec remote = { (void*)addr, len };
@@ -29,6 +30,7 @@ ssize_t read_mem(pid_t pid, unsigned long addr, void *buf, size_t len) {
     return -1;
 }
 
+// كتابة كتلة إلى الذاكرة
 ssize_t write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     struct iovec local = { (void*)buf, len };
     struct iovec remote = { (void*)addr, len };
@@ -46,7 +48,7 @@ ssize_t write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     return -1;
 }
 
-// ---- البحث والاستبدال (الأمر scan) ----
+// البحث عن قيمة float واستبدالها
 void scan_and_replace(pid_t pid, float target, float new_value) {
     char maps_path[128];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
@@ -91,7 +93,7 @@ void scan_and_replace(pid_t pid, float target, float new_value) {
     printf("Patched %d occurrences\n", count);
 }
 
-// ---- استخراج مكتبات .so من الذاكرة (الأمر dumplibs) ----
+// استخراج جميع مقاطع .so من الذاكرة (للأغراض العامة)
 void dump_libs(pid_t pid, const char *outdir) {
     char maps_path[128];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
@@ -101,7 +103,6 @@ void dump_libs(pid_t pid, const char *outdir) {
         return;
     }
 
-    // إنشاء مجلد الإخراج إذا لم يوجد
     char mkdir_cmd[512];
     snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", outdir);
     system(mkdir_cmd);
@@ -114,19 +115,14 @@ void dump_libs(pid_t pid, const char *outdir) {
         char path[256] = {0};
         if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %255[^\n]", &start, &end, perms, path) < 3) continue;
 
-        // نستخرج فقط المناطق التي تحتوي على .so
         if (strstr(path, ".so") == NULL) continue;
-        if (perms[0] != 'r') continue; // يجب أن تكون قابلة للقراءة
+        if (perms[0] != 'r') continue;
 
-        // إنشاء اسم ملف الإخراج
         char filename[512];
         char *base = basename(path);
         snprintf(filename, sizeof(filename), "%s/%s_%lx_%lx.so", outdir, base, start, end);
         FILE *out = fopen(filename, "wb");
-        if (!out) {
-            perror("fopen output");
-            continue;
-        }
+        if (!out) continue;
 
         size_t len = end - start;
         char *buf = malloc(len);
@@ -140,15 +136,76 @@ void dump_libs(pid_t pid, const char *outdir) {
             fwrite(buf, 1, n, out);
             count++;
             printf("Dumped: %s (%zu bytes)\n", filename, n);
-        } else {
-            printf("Failed to read %lx-%lx %s\n", start, end, path);
         }
-
         free(buf);
         fclose(out);
     }
     fclose(fp);
     printf("Total dumped: %d files\n", count);
+}
+
+// استخراج مكتبة .so واحدة كاملة (ELF) من الذاكرة
+void dump_single_lib(pid_t pid, const char *libname, const char *outpath) {
+    char maps_path[128];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+    FILE *fp = fopen(maps_path, "r");
+    if (!fp) {
+        perror("fopen maps");
+        return;
+    }
+
+    unsigned long base_addr = 0;
+    char line[512];
+    int found = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long start, end;
+        char perms[5];
+        char path[256] = {0};
+        if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %255[^\n]", &start, &end, perms, path) < 3) continue;
+        if (strstr(path, libname) != NULL) {
+            base_addr = start;
+            found = 1;
+            break;
+        }
+    }
+    fclose(fp);
+    if (!found) {
+        printf("Library %s not found\n", libname);
+        return;
+    }
+
+    Elf64_Ehdr ehdr;
+    if (read_mem(pid, base_addr, &ehdr, sizeof(ehdr)) <= 0) {
+        printf("Failed to read ELF header\n");
+        return;
+    }
+
+    FILE *out = fopen(outpath, "wb");
+    if (!out) {
+        perror("fopen output");
+        return;
+    }
+
+    // كتابة ELF header كما هو
+    fwrite(&ehdr, sizeof(ehdr), 1, out);
+
+    // نسخ المقاطع المحملة
+    for (int i = 0; i < ehdr.e_phnum; i++) {
+        Elf64_Phdr phdr;
+        unsigned long phdr_addr = base_addr + ehdr.e_phoff + i * ehdr.e_phentsize;
+        if (read_mem(pid, phdr_addr, &phdr, sizeof(phdr)) <= 0) continue;
+        if (phdr.p_type == PT_LOAD && phdr.p_filesz > 0) {
+            fseek(out, phdr.p_offset, SEEK_SET);
+            char *buf = malloc(phdr.p_filesz);
+            if (read_mem(pid, base_addr + phdr.p_vaddr, buf, phdr.p_filesz) > 0) {
+                fwrite(buf, 1, phdr.p_filesz, out);
+            }
+            free(buf);
+        }
+    }
+
+    fclose(out);
+    printf("Dumped %s to %s\n", libname, outpath);
 }
 
 int main(int argc, char *argv[]) {
@@ -160,6 +217,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  %s writeb <pid> <address> <value_byte>\n", argv[0]);
         fprintf(stderr, "  %s scan <pid> <target_float> <new_float>\n", argv[0]);
         fprintf(stderr, "  %s dumplibs <pid> <output_dir>\n", argv[0]);
+        fprintf(stderr, "  %s dumpelf <pid> <libname> <output_path>\n", argv[0]);
         return 1;
     }
 
@@ -174,6 +232,11 @@ int main(int argc, char *argv[]) {
 
     if (strcmp(argv[1], "dumplibs") == 0 && argc == 4) {
         dump_libs(pid, argv[3]);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "dumpelf") == 0 && argc == 5) {
+        dump_single_lib(pid, argv[3], argv[4]);
         return 0;
     }
 
