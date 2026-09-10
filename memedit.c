@@ -12,7 +12,6 @@
 #include <libgen.h>
 #include <elf.h>
 
-// قراءة كتلة من الذاكرة
 ssize_t read_mem(pid_t pid, unsigned long addr, void *buf, size_t len) {
     struct iovec local = { buf, len };
     struct iovec remote = { (void*)addr, len };
@@ -30,7 +29,6 @@ ssize_t read_mem(pid_t pid, unsigned long addr, void *buf, size_t len) {
     return -1;
 }
 
-// كتابة كتلة إلى الذاكرة
 ssize_t write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     struct iovec local = { (void*)buf, len };
     struct iovec remote = { (void*)addr, len };
@@ -48,7 +46,6 @@ ssize_t write_mem(pid_t pid, unsigned long addr, const void *buf, size_t len) {
     return -1;
 }
 
-// إرفاق العملية
 void attach_process(pid_t pid) {
     if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
         perror("ptrace ATTACH");
@@ -57,20 +54,15 @@ void attach_process(pid_t pid) {
     waitpid(pid, NULL, 0);
 }
 
-// فصل العملية
 void detach_process(pid_t pid) {
     ptrace(PTRACE_DETACH, pid, NULL, NULL);
 }
 
-// البحث عن قيمة float واستبدالها
-void scan_and_replace(pid_t pid, float target, float new_value) {
+int scan_and_replace_count(pid_t pid, float target, float new_value) {
     char maps_path[128];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
     FILE *fp = fopen(maps_path, "r");
-    if (!fp) {
-        perror("fopen maps");
-        return;
-    }
+    if (!fp) return 0;
 
     unsigned long start, end;
     char perms[5];
@@ -84,38 +76,44 @@ void scan_and_replace(pid_t pid, float target, float new_value) {
 
         char *buf = malloc(len);
         if (!buf) continue;
-
         ssize_t nread = read_mem(pid, start, buf, len);
-        if (nread <= 0) {
-            free(buf);
-            continue;
-        }
+        if (nread <= 0) { free(buf); continue; }
 
-        for (size_t i = 0; i + sizeof(float) <= (size_t)nread; i += 4) {
+        for (size_t i = 0; i + 4 <= (size_t)nread; i += 4) {
             float val;
             memcpy(&val, buf + i, sizeof(val));
             if (fabsf(val - target) < 0.01f) {
-                float new_val = new_value;
-                if (write_mem(pid, start + i, &new_val, sizeof(new_val)) > 0) {
+                if (write_mem(pid, start + i, &new_value, sizeof(new_value)) > 0)
                     count++;
-                }
             }
         }
         free(buf);
     }
     fclose(fp);
-    printf("Patched %d occurrences\n", count);
+    return count;
 }
 
-// استخراج جميع مقاطع .so من الذاكرة (للأغراض العامة)
+void loop_scan(pid_t pid, float target, float new_value, int interval_ms) {
+    int attempt = 0;
+    while (1) {
+        attempt++;
+        int n = scan_and_replace_count(pid, target, new_value);
+        printf("[%d] Patched %d\n", attempt, n);
+        fflush(stdout);
+        usleep(interval_ms * 1000);
+    }
+}
+
+void scan_and_replace(pid_t pid, float target, float new_value) {
+    int c = scan_and_replace_count(pid, target, new_value);
+    printf("Patched %d occurrences\n", c);
+}
+
 void dump_libs(pid_t pid, const char *outdir) {
     char maps_path[128];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
     FILE *fp = fopen(maps_path, "r");
-    if (!fp) {
-        perror("fopen maps");
-        return;
-    }
+    if (!fp) { perror("fopen maps"); return; }
 
     char mkdir_cmd[512];
     snprintf(mkdir_cmd, sizeof(mkdir_cmd), "mkdir -p %s", outdir);
@@ -130,7 +128,6 @@ void dump_libs(pid_t pid, const char *outdir) {
         char perms[5];
         char path[256] = {0};
         if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %255[^\n]", &start, &end, perms, path) < 3) continue;
-
         if (strstr(path, ".so") == NULL) continue;
         if (perms[0] != 'r') continue;
 
@@ -142,17 +139,9 @@ void dump_libs(pid_t pid, const char *outdir) {
 
         size_t len = end - start;
         char *buf = malloc(len);
-        if (!buf) {
-            fclose(out);
-            continue;
-        }
-
+        if (!buf) { fclose(out); continue; }
         ssize_t n = read_mem(pid, start, buf, len);
-        if (n > 0) {
-            fwrite(buf, 1, n, out);
-            count++;
-            printf("Dumped: %s (%zu bytes)\n", filename, n);
-        }
+        if (n > 0) { fwrite(buf, 1, n, out); count++; }
         free(buf);
         fclose(out);
     }
@@ -162,15 +151,11 @@ void dump_libs(pid_t pid, const char *outdir) {
     printf("Total dumped: %d files\n", count);
 }
 
-// استخراج مكتبة .so واحدة كاملة (ELF) من الذاكرة
 void dump_single_lib(pid_t pid, const char *libname, const char *outpath) {
     char maps_path[128];
     snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
     FILE *fp = fopen(maps_path, "r");
-    if (!fp) {
-        perror("fopen maps");
-        return;
-    }
+    if (!fp) { perror("fopen maps"); return; }
 
     unsigned long base_addr = 0;
     char line[512];
@@ -180,47 +165,62 @@ void dump_single_lib(pid_t pid, const char *libname, const char *outpath) {
         char perms[5];
         char path[256] = {0};
         if (sscanf(line, "%lx-%lx %4s %*s %*s %*s %255[^\n]", &start, &end, perms, path) < 3) continue;
-        if (strstr(path, libname) != NULL) {
+        if (strstr(path, libname) != NULL && strstr(perms, "r-xp") != NULL) {
             base_addr = start;
             found = 1;
             break;
         }
     }
     fclose(fp);
-    if (!found) {
-        printf("Library %s not found\n", libname);
-        return;
-    }
+    if (!found) { printf("Library %s not found\n", libname); return; }
 
     attach_process(pid);
 
-    Elf64_Ehdr ehdr;
-    if (read_mem(pid, base_addr, &ehdr, sizeof(ehdr)) <= 0) {
-        printf("Failed to read ELF header\n");
+    unsigned char ident[16];
+    if (read_mem(pid, base_addr, ident, 16) <= 0) {
+        printf("Failed to read ELF identification\n");
         detach_process(pid);
         return;
     }
 
     FILE *out = fopen(outpath, "wb");
-    if (!out) {
-        perror("fopen output");
-        detach_process(pid);
-        return;
-    }
+    if (!out) { perror("fopen output"); detach_process(pid); return; }
 
-    fwrite(&ehdr, sizeof(ehdr), 1, out);
-
-    for (int i = 0; i < ehdr.e_phnum; i++) {
-        Elf64_Phdr phdr;
-        unsigned long phdr_addr = base_addr + ehdr.e_phoff + i * ehdr.e_phentsize;
-        if (read_mem(pid, phdr_addr, &phdr, sizeof(phdr)) <= 0) continue;
-        if (phdr.p_type == PT_LOAD && phdr.p_filesz > 0) {
-            fseek(out, phdr.p_offset, SEEK_SET);
-            char *buf = malloc(phdr.p_filesz);
-            if (read_mem(pid, base_addr + phdr.p_vaddr, buf, phdr.p_filesz) > 0) {
-                fwrite(buf, 1, phdr.p_filesz, out);
+    if (ident[EI_CLASS] == ELFCLASS64) {
+        Elf64_Ehdr ehdr;
+        if (read_mem(pid, base_addr, &ehdr, sizeof(ehdr)) <= 0) {
+            fclose(out); detach_process(pid); return;
+        }
+        fwrite(&ehdr, sizeof(ehdr), 1, out);
+        for (int i = 0; i < ehdr.e_phnum; i++) {
+            Elf64_Phdr phdr;
+            unsigned long phdr_addr = base_addr + ehdr.e_phoff + i * ehdr.e_phentsize;
+            if (read_mem(pid, phdr_addr, &phdr, sizeof(phdr)) <= 0) continue;
+            if (phdr.p_type == PT_LOAD && phdr.p_filesz > 0) {
+                fseek(out, phdr.p_offset, SEEK_SET);
+                char *buf = malloc(phdr.p_filesz);
+                if (read_mem(pid, base_addr + phdr.p_vaddr, buf, phdr.p_filesz) > 0)
+                    fwrite(buf, 1, phdr.p_filesz, out);
+                free(buf);
             }
-            free(buf);
+        }
+    } else if (ident[EI_CLASS] == ELFCLASS32) {
+        Elf32_Ehdr ehdr;
+        if (read_mem(pid, base_addr, &ehdr, sizeof(ehdr)) <= 0) {
+            fclose(out); detach_process(pid); return;
+        }
+        fwrite(&ehdr, sizeof(ehdr), 1, out);
+        for (int i = 0; i < ehdr.e_phnum; i++) {
+            Elf32_Phdr phdr;
+            unsigned long phdr_addr = base_addr + ehdr.e_phoff + i * ehdr.e_phentsize;
+            if (read_mem(pid, phdr_addr, &phdr, sizeof(phdr)) <= 0) continue;
+            if (phdr.p_type == PT_LOAD && phdr.p_filesz > 0) {
+                fseek(out, phdr.p_offset, SEEK_SET);
+                char *buf = malloc(phdr.p_filesz);
+                if (read_mem(pid, base_addr + phdr.p_vaddr, buf, phdr.p_filesz) > 0)
+                    fwrite(buf, 1, phdr.p_filesz, out);
+                free(buf);
+            }
         }
     }
 
@@ -237,6 +237,7 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "  %s writei <pid> <address> <value_int>\n", argv[0]);
         fprintf(stderr, "  %s writeb <pid> <address> <value_byte>\n", argv[0]);
         fprintf(stderr, "  %s scan <pid> <target_float> <new_float>\n", argv[0]);
+        fprintf(stderr, "  %s loopscan <pid> <target_float> <new_float> <interval_ms>\n", argv[0]);
         fprintf(stderr, "  %s dumplibs <pid> <output_dir>\n", argv[0]);
         fprintf(stderr, "  %s dumpelf <pid> <libname> <output_path>\n", argv[0]);
         return 1;
@@ -244,10 +245,16 @@ int main(int argc, char *argv[]) {
 
     pid_t pid = atoi(argv[2]);
 
-    if (strcmp(argv[1], "scan") == 0 && argc == 5) {
+    if (strcmp(argv[1], "loopscan") == 0 && argc == 6) {
         float target = atof(argv[3]);
         float new_val = atof(argv[4]);
-        scan_and_replace(pid, target, new_val);
+        int interval = atoi(argv[5]);
+        loop_scan(pid, target, new_val, interval);
+        return 0;
+    }
+
+    if (strcmp(argv[1], "scan") == 0 && argc == 5) {
+        scan_and_replace(pid, atof(argv[3]), atof(argv[4]));
         return 0;
     }
 
